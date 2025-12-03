@@ -1,8 +1,8 @@
-// main.dart – גרסה מלאה עם ActionChip במקום Chip, כולל שליטה בעכבר, גלילה וקיצורי מקלדת
-
+import 'voice_service.dart';
 import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // עבור הרטט
 
 void main() => runApp(MouseControllerApp());
 
@@ -10,8 +10,12 @@ class MouseControllerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Tablet Mouse Controller',
-      theme: ThemeData(primarySwatch: Colors.blue),
+      title: 'Touch & Voice Control',
+      debugShowCheckedModeBanner: false, // מוריד את סרט ה-DEBUG בצד
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: Color(0xFF1E1E2C),
+        appBarTheme: AppBarTheme(backgroundColor: Color(0xFF2D2D44)),
+      ),
       home: MouseControlScreen(),
     );
   }
@@ -23,22 +27,46 @@ class MouseControlScreen extends StatefulWidget {
 }
 
 class _MouseControlScreenState extends State<MouseControlScreen> {
+  // --- משתנים ---
+  final VoiceService _voiceService = VoiceService();
+  String _voiceDebugText = "Scroll / Voice";
+
   RawDatagramSocket? _udpSocket;
-  Offset? _lastPosition, _lastScrollPosition;
+  Offset? _lastPosition; // מיקום האצבע האחרון
+  Offset? _lastScrollPosition;
+
   String? _currentIP;
   bool _discovered = false;
   bool _manualOverride = false;
   List<String> _recentIPs = [];
-  double _currentScale = 1.6667;
-  bool _selectionMode = false;
+
+  double _currentScale = 1.7;
+
   static const int COMMAND_PORT = 5000;
   static const int DISCOVERY_PORT = 5001;
   static const String DISCOVER_MSG = 'DISCOVER';
   static const String SERVER_RESP = 'MOUSE_SERVER';
-  
+
+  // רשימת הקיצורים
+  final List<Map<String, dynamic>> _quickActions = [
+    {'label': 'Copy', 'cmd': 'HOTKEY_CTRL_C', 'icon': Icons.copy},
+    {'label': 'Paste', 'cmd': 'HOTKEY_CTRL_V', 'icon': Icons.paste},
+    {'label': 'Cut', 'cmd': 'HOTKEY_CTRL_X', 'icon': Icons.content_cut},
+    {'label': 'Undo', 'cmd': 'HOTKEY_CTRL_Z', 'icon': Icons.undo},
+    {'label': 'Save', 'cmd': 'HOTKEY_CTRL_S', 'icon': Icons.save},
+    {'label': 'Alt+Tab', 'cmd': 'HOTKEY_ALT_TAB', 'icon': Icons.tab},
+    {'label': 'Enter', 'cmd': 'HOTKEY_ENTER', 'icon': Icons.keyboard_return},
+    {'label': 'F5', 'cmd': 'HOTKEY_F5', 'icon': Icons.refresh},
+  ];
+
   @override
   void initState() {
     super.initState();
+    _voiceService.initialize();
+    _connectUdp();
+  }
+
+  void _connectUdp() {
     RawDatagramSocket.bind(InternetAddress.anyIPv4, 0).then((socket) {
       socket.broadcastEnabled = true;
       setState(() => _udpSocket = socket);
@@ -58,7 +86,6 @@ class _MouseControlScreenState extends State<MouseControlScreen> {
               _currentIP = dg.address.address;
               _discovered = true;
             });
-            print('► Discovered server at $_currentIP');
           }
         }
       }
@@ -69,7 +96,6 @@ class _MouseControlScreenState extends State<MouseControlScreen> {
     if (_udpSocket == null || _discovered || _manualOverride) return;
     final data = utf8.encode(DISCOVER_MSG);
     _udpSocket!.send(data, InternetAddress('255.255.255.255'), DISCOVERY_PORT);
-    print('◉ Broadcasted DISCOVER');
     Future.delayed(Duration(seconds: 2), () {
       if (!_discovered && !_manualOverride) _discoverServer();
     });
@@ -85,64 +111,89 @@ class _MouseControlScreenState extends State<MouseControlScreen> {
   }
 
   void _openSettings() async {
-    final result = await Navigator.push<String>(
+    final result = await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => SettingsScreen(
           initialIP: _currentIP ?? '',
           recentIPs: _recentIPs,
+          currentScale: _currentScale,
         ),
       ),
     );
-    if (result != null && result.trim().isNotEmpty) {
-      final ip = result.trim();
-      setState(() {
-        _manualOverride = true;
-        _discovered = true;
-        _currentIP = ip;
-        _recentIPs.remove(ip);
-        _recentIPs.insert(0, ip);
-        if (_recentIPs.length > 3) _recentIPs.removeLast();
-      });
-    }
-  }
 
-  void _openHotkeysPage() {
-    Navigator.push(context, MaterialPageRoute(builder: (_) => HotkeysScreen(sendHotkey: _sendCommand)));
+    if (result != null && result is Map) {
+      if (result['ip'] != null && result['ip'].toString().isNotEmpty) {
+        setState(() {
+          _manualOverride = true;
+          _discovered = true;
+          _currentIP = result['ip'];
+          if (!_recentIPs.contains(_currentIP)) {
+            _recentIPs.insert(0, _currentIP!);
+          }
+        });
+      }
+      if (result['scale'] != null) {
+        setState(() => _currentScale = result['scale']);
+        _sendCommand('SET_SCALE:$_currentScale');
+      }
+    }
   }
 
   void _sendCommand(String cmd) {
     if (_udpSocket != null && _currentIP != null) {
       final data = utf8.encode(cmd + '\n');
       _udpSocket!.send(data, InternetAddress(_currentIP!), COMMAND_PORT);
+
+      // --- תיקון: מחקתי את התנאי שהסתיר את הלוגים ---
       print('[UDP ➤ $_currentIP] $cmd');
+      // ---------------------------------------------
+
+      // רטט חכם
+      if (cmd.contains("CLICK") ||
+          cmd.contains("ENTER") ||
+          cmd.contains("HOTKEY")) {
+        HapticFeedback.mediumImpact();
+      } else if (!cmd.contains("MOVE") && !cmd.contains("SCALE")) {
+        HapticFeedback.lightImpact();
+      }
     }
   }
-  void _toggleSelection() {
-    if (!_selectionMode) {
-      _sendCommand('LEFT_DOWN');
-    } else {
-      _sendCommand('LEFT_UP');
+
+  void _processVoiceCommand(String text) {
+    print("Voice received: $text");
+    setState(() => _voiceDebugText = text.isEmpty ? "Speaking..." : text);
+    if (text.isNotEmpty) {
+      _sendCommand('VOICE_RAW:$text');
     }
-    setState(() => _selectionMode = !_selectionMode);
   }
+
+  // --- לוגיקת תנועה מתוקנת ---
   void _handlePanUpdate(DragUpdateDetails d) {
     final p = d.localPosition;
     if (_lastPosition != null) {
       final dx = p.dx - _lastPosition!.dx;
       final dy = p.dy - _lastPosition!.dy;
-      _sendCommand('MOVE_DELTA:$dx,$dy');
+      // שולח פקודה רק אם הייתה תזוזה
+      if (dx != 0 || dy != 0) {
+        _sendCommand('MOVE_DELTA:$dx,$dy');
+      }
     }
     _lastPosition = p;
   }
 
-  void _handlePanEnd(DragEndDetails _) => _lastPosition = null;
+  void _handlePanEnd(DragEndDetails _) {
+    _lastPosition = null;
+  }
 
   void _handleScrollUpdate(DragUpdateDetails d) {
     final p = d.localPosition;
     if (_lastScrollPosition != null) {
       final dy = p.dy - _lastScrollPosition!.dy;
-      _sendCommand(dy < 0 ? 'SCROLL_UP' : 'SCROLL_DOWN');
+      // רגישות גלילה
+      if (dy.abs() > 1.0) {
+        _sendCommand(dy < 0 ? 'SCROLL_UP' : 'SCROLL_DOWN');
+      }
     }
     _lastScrollPosition = p;
   }
@@ -153,378 +204,223 @@ class _MouseControlScreenState extends State<MouseControlScreen> {
   void _rightClick() => _sendCommand('RIGHT_CLICK');
 
   @override
-  void dispose() {
-    _udpSocket?.close();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final statusText = _currentIP != null ? 'Connected to $_currentIP' : 'Not connected';
+    final bool isConnected = _currentIP != null;
+    final Color statusColor =
+        isConnected ? Colors.greenAccent : Colors.redAccent;
+
     return Scaffold(
       appBar: AppBar(
-        title: Text('Tablet Mouse Controller'),
+        title: Text('Touch & Voice'),
         actions: [
-          IconButton(icon: Icon(Icons.bolt), onPressed: _openHotkeysPage),
           IconButton(icon: Icon(Icons.refresh), onPressed: _onRescan),
           IconButton(icon: Icon(Icons.settings), onPressed: _openSettings),
         ],
       ),
       body: Column(
         children: [
-          Container(color: Colors.grey[300], padding: EdgeInsets.all(8), child: Text(statusText)),
+          // סטטוס
+          Container(
+            color: statusColor.withOpacity(0.1),
+            padding: EdgeInsets.symmetric(vertical: 4),
+            width: double.infinity,
+            child: Center(
+              child: Text(
+                isConnected
+                    ? 'Connected to $_currentIP'
+                    : 'Disconnected (Check Settings)',
+                style: TextStyle(color: statusColor, fontSize: 12),
+              ),
+            ),
+          ),
+
+          // אזור ראשי: משטח + גלילה
           Expanded(
-            child: Row(
-              children: [
-                Expanded(
-                  flex: 6,
-                  child: GestureDetector(
-                    onPanUpdate: _handlePanUpdate,
-                    onPanEnd: _handlePanEnd,
-                    child: Container(
-                      color: Colors.grey[200],
-                      child: Center(child: Text('Move your finger to control the mouse', style: TextStyle(fontSize: 18))),
-                    ),
-                  ),
-                ),
-                Container(
-                  width: 150,
-                  decoration: BoxDecoration(border: Border.all(color: Colors.black, width: 2), color: Colors.blue[100]),
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onPanUpdate: _handleScrollUpdate,
-                    onPanEnd: _handleScrollEnd,
-                    child: Center(
-                      child: RotatedBox(
-                        quarterTurns: 3,
-                        child: Text('Scroll Area', style: TextStyle(fontSize: 16)),
+            child: Padding(
+              padding: const EdgeInsets.all(12.0),
+              child: Row(
+                children: [
+                  // --- משטח תנועה (Move Area) - התיקון הגדול ---
+                  Expanded(
+                    flex: 5,
+                    child: GestureDetector(
+                      // קריטי: מאפשר מגע בכל מקום
+                      behavior: HitTestBehavior.opaque,
+
+                      // 1. אתחול בנגיעה ראשונה (מה שהיה חסר!)
+                      onPanStart: (details) {
+                        _lastPosition = details.localPosition;
+                        print("🟢 Touch Start");
+                      },
+                      // 2. עדכון בתזוזה
+                      onPanUpdate: _handlePanUpdate,
+                      // 3. איפוס בסיום
+                      onPanEnd: _handlePanEnd,
+
+                      // 4. דאבל קליק
+                      onDoubleTap: () {
+                        print("🔥 Double Tap!");
+                        _leftClick();
+                      },
+
+                      child: Container(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [Color(0xFF3A3A5E), Color(0xFF2B2B40)],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          ),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.touch_app,
+                                size: 48, color: Colors.white12),
+                            Text("Touchpad",
+                                style: TextStyle(color: Colors.white12)),
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                ),
-              ],
+
+                  SizedBox(width: 12),
+
+                  // --- אזור גלילה וקול ---
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onPanStart: (d) =>
+                        _lastScrollPosition = d.localPosition, // גם פה חשוב!
+                    onPanUpdate: _handleScrollUpdate,
+                    onPanEnd: _handleScrollEnd,
+                    onLongPress: () {
+                      _voiceService
+                          .listen((text) => _processVoiceCommand(text));
+                      setState(() => _voiceDebugText = "Listening...");
+                      HapticFeedback.heavyImpact();
+                    },
+                    onLongPressUp: () {
+                      _voiceService.stop();
+                      setState(() => _voiceDebugText = "Scroll / Voice");
+                    },
+                    child: Container(
+                      width: 90,
+                      decoration: BoxDecoration(
+                        color: _voiceDebugText == "Listening..."
+                            ? Colors.redAccent.withOpacity(0.8)
+                            : Color(0xFF4A4A6A),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                              _voiceDebugText == "Listening..."
+                                  ? Icons.mic
+                                  : Icons.unfold_more,
+                              color: Colors.white),
+                          SizedBox(height: 8),
+                          RotatedBox(
+                              quarterTurns: 0,
+                              child: Text(_voiceDebugText,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(fontSize: 12))),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
-          Container(
-            color: Colors.grey[300],
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+
+          // לחצני עכבר ראשיים
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
               children: [
-                Text("Scale: ${_currentScale.toStringAsFixed(2)}", style: TextStyle(fontSize: 16)),
-                Slider(
-                  value: _currentScale,
-                  min: 0.2,
-                  max: 5.0,
-                  divisions: 48,
-                  label: _currentScale.toStringAsFixed(2),
-                  onChanged: (v) {
-                    setState(() => _currentScale = v);
-                    _sendCommand('SET_SCALE:$v');
-                  },
-                ),
+                Expanded(child: _buildButton('Left', Colors.blue, _leftClick)),
+                SizedBox(width: 12),
+                Expanded(
+                    child: _buildButton('Right', Colors.purple, _rightClick)),
               ],
             ),
           ),
-          Row(
-            children: [
-              Expanded(
-                child: GestureDetector(
-                  onTap: _leftClick,
-                  child: Container(
-                    color: Colors.green[200],
-                    height: 60,
-                    child: Center(child: Text('Left Click', style: TextStyle(fontSize: 16))),
+
+          SizedBox(height: 16),
+
+          // שורת קיצורים מהירים
+          Container(
+            height: 70,
+            padding: EdgeInsets.only(bottom: 12),
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: EdgeInsets.symmetric(horizontal: 16),
+              itemCount: _quickActions.length,
+              itemBuilder: (context, index) {
+                final action = _quickActions[index];
+                return Padding(
+                  padding: const EdgeInsets.only(right: 10),
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Color(0xFF383850),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                      padding: EdgeInsets.symmetric(horizontal: 12),
+                    ),
+                    onPressed: () => _sendCommand(action['cmd']),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(action['icon'], color: Colors.white70, size: 20),
+                        Text(action['label'],
+                            style:
+                                TextStyle(color: Colors.white, fontSize: 10)),
+                      ],
+                    ),
                   ),
-                ),
-              ),
-              Expanded(
-                child: GestureDetector(
-                  onTap: _rightClick,
-                  child: Container(
-                    color: Colors.red[200],
-                    height: 60,
-                    child: Center(child: Text('Right Click', style: TextStyle(fontSize: 16))),
-                  ),
-                ),
-              ),
-              SizedBox(width: 8),
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: _toggleSelection,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _selectionMode ? Colors.orange : Colors.blueGrey,
-                    minimumSize: Size.fromHeight(60),
-                  ),
-                  child: Text(
-                    _selectionMode ? 'Stop Select' : 'Start Select',
-                    style: TextStyle(fontSize: 16),
-                  ),
-                ),
-              ),
-            ],
+                );
+              },
+            ),
           ),
         ],
       ),
     );
   }
-}
-class HotkeysScreen extends StatefulWidget {
-  final void Function(String) sendHotkey;
-  HotkeysScreen({required this.sendHotkey});
 
-  @override
-  _HotkeysScreenState createState() => _HotkeysScreenState();
-}
-
-class _HotkeysScreenState extends State<HotkeysScreen> {
-  final TextEditingController _customKeyController = TextEditingController();
-  final List<String> _savedKeys = [
-    'Ctrl+C', 'Ctrl+V', 'Ctrl+S', 'Ctrl+Z', 'Ctrl+Y',
-    'Ctrl+Shift+Z', 'Alt+Tab', 'Ctrl+Alt+Del', 'Ctrl+A', 'F5'
-  ];
-
-  Offset? _lastMovePosition;
-  Offset? _lastScrollPosition;
-  double _currentScale = 1.0;
-  bool _selectionMode = false; // מצב סימון טקסט
-
-  void _sendHotkey(String cmd) => widget.sendHotkey(cmd);
-
-  void _sendKey(String label) {
-    final key = label.toUpperCase().replaceAll('+', '_').replaceAll(' ', '_');
-    _sendHotkey('HOTKEY_$key');
-  }
-
-  void _addCustomKey() {
-    final raw = _customKeyController.text.trim();
-    if (raw.isEmpty) return;
-    setState(() {
-      if (!_savedKeys.contains(raw)) _savedKeys.insert(0, raw);
-      _customKeyController.clear();
-    });
-  }
-
-  void _removeKey(String key) => setState(() => _savedKeys.remove(key));
-
-  // Toggle ווליאני למצב סימון טקסט
-  void _toggleSelection() {
-    if (!_selectionMode) {
-      _sendHotkey('LEFT_DOWN');
-    } else {
-      _sendHotkey('LEFT_UP');
-    }
-    setState(() {
-      _selectionMode = !_selectionMode;
-    });
-  }
-
-  // Move handlers
-  void _handleMoveUpdate(DragUpdateDetails d) {
-    final p = d.localPosition;
-    if (_lastMovePosition != null) {
-      final dx = p.dx - _lastMovePosition!.dx;
-      final dy = p.dy - _lastMovePosition!.dy;
-      _sendHotkey('MOVE_DELTA:$dx,$dy');
-    }
-    _lastMovePosition = p;
-  }
-  void _handleMoveEnd(DragEndDetails _) => _lastMovePosition = null;
-
-  // Scroll handlers
-  void _handleScrollUpdate(DragUpdateDetails d) {
-    final p = d.localPosition;
-    if (_lastScrollPosition != null) {
-      final dy = p.dy - _lastScrollPosition!.dy;
-      _sendHotkey(dy < 0 ? 'SCROLL_UP' : 'SCROLL_DOWN');
-    }
-    _lastScrollPosition = p;
-  }
-  void _handleScrollEnd(DragEndDetails _) => _lastScrollPosition = null;
-
-  void _leftClick() => _sendHotkey('LEFT_CLICK');
-  void _rightClick() => _sendHotkey('RIGHT_CLICK');
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text('Custom Keyboard Shortcuts')),
-      body: Padding(
-        padding: EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // 1. שורת הוספת קיצור
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _customKeyController,
-                    decoration: InputDecoration(
-                      labelText: 'New hotkey (e.g. Ctrl+Shift+X)',
-                      border: OutlineInputBorder(),
-                    ),
-                    onSubmitted: (_) => _addCustomKey(),
-                  ),
-                ),
-                SizedBox(width: 8),
-                ElevatedButton(onPressed: _addCustomKey, child: Text('Add')),
-              ],
-            ),
-            SizedBox(height: 16),
-
-            // 2. רשימת הקיצורים
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: _savedKeys.map((k) {
-                return Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    ActionChip(
-                      label: Text(k),
-                      onPressed: () => _sendKey(k),
-                      backgroundColor: Colors.blue[100],
-                      labelStyle: TextStyle(fontSize: 14),
-                    ),
-                    IconButton(
-                      icon: Icon(Icons.close, size: 16, color: Colors.red),
-                      onPressed: () => _removeKey(k),
-                    ),
-                  ],
-                );
-              }).toList(),
-            ),
-            SizedBox(height: 24),
-
-            // 3. Move + Scroll בצדדים, עם גובה מוגדל
-            Text('Control Area', style: TextStyle(fontSize: 16)),
-            SizedBox(height: 8),
-            Row(
-              children: [
-                // Move Area גבוה יותר
-                Expanded(
-                  flex: 3,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onPanUpdate: _handleMoveUpdate,
-                    onPanEnd: _handleMoveEnd,
-                    child: Container(
-                      height: 200,
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.black54, width: 1),
-                        color: Colors.grey[200],
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Center(child: Text('Move', style: TextStyle(fontSize: 14))),
-                    ),
-                  ),
-                ),
-                SizedBox(width: 8),
-                // Scroll Area גבוה יותר
-                Container(
-                  width: 80,
-                  height: 200,
-                  decoration: BoxDecoration(
-                    border: Border.all(color: Colors.black54, width: 1),
-                    color: Colors.grey[200],
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onPanUpdate: _handleScrollUpdate,
-                    onPanEnd: _handleScrollEnd,
-                    child: Center(
-                      child: RotatedBox(
-                        quarterTurns: 3,
-                        child: Text('Scroll', style: TextStyle(fontSize: 14)),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            SizedBox(height: 16),
-
-            // 4. Scale slider קטן
-            Container(
-              padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.grey[300],
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text("Scale: ${_currentScale.toStringAsFixed(2)}", style: TextStyle(fontSize: 14)),
-                  Slider(
-                    value: _currentScale,
-                    min: 0.2,
-                    max: 5.0,
-                    divisions: 48,
-                    label: _currentScale.toStringAsFixed(2),
-                    onChanged: (v) {
-                      setState(() => _currentScale = v);
-                      _sendHotkey('SET_SCALE:$v');
-                    },
-                  ),
-                ],
-              ),
-            ),
-            SizedBox(height: 16),
-
-            // 5. כפתור Toggle לסימון טקסט
-            ElevatedButton(
-              onPressed: _toggleSelection,
-              child: Text(_selectionMode ? 'Stop Selecting' : 'Start Selecting'),
-            ),
-            SizedBox(height: 16),
-
-            // 6. לחצני Left ו-Right Click רגילים
-            Row(
-              children: [
-                Expanded(
-                  child: GestureDetector(
-                    onTap: _leftClick,
-                    child: Container(
-                      height: 50,
-                      decoration: BoxDecoration(
-                        color: Colors.green[200],
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Center(child: Text('Left Click', style: TextStyle(fontSize: 16))),
-                    ),
-                  ),
-                ),
-                SizedBox(width: 8),
-                Expanded(
-                  child: GestureDetector(
-                    onTap: _rightClick,
-                    child: Container(
-                      height: 50,
-                      decoration: BoxDecoration(
-                        color: Colors.red[200],
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Center(child: Text('Right Click', style: TextStyle(fontSize: 16))),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
+  Widget _buildButton(String label, Color color, VoidCallback onTap) {
+    return Material(
+      color: color.withOpacity(0.8),
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: () {
+          onTap();
+          HapticFeedback.lightImpact(); // רטט בלחיצה
+        },
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          height: 60,
+          alignment: Alignment.center,
+          child: Text(label,
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
         ),
       ),
     );
   }
 }
 
-
+// --- מסך הגדרות ---
 class SettingsScreen extends StatefulWidget {
   final String initialIP;
   final List<String> recentIPs;
+  final double currentScale;
 
-  SettingsScreen({required this.initialIP, required this.recentIPs});
+  SettingsScreen(
+      {required this.initialIP,
+      required this.recentIPs,
+      required this.currentScale});
 
   @override
   _SettingsScreenState createState() => _SettingsScreenState();
@@ -532,48 +428,80 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController _ipController;
+  late double _tempScale;
 
   @override
   void initState() {
     super.initState();
     _ipController = TextEditingController(text: widget.initialIP);
+    _tempScale = widget.currentScale;
   }
 
-  void _save() => Navigator.pop(context, _ipController.text.trim());
+  void _save() {
+    Navigator.pop(context, {
+      'ip': _ipController.text.trim(),
+      'scale': _tempScale,
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Server Settings')),
+      appBar: AppBar(title: Text('Settings')),
       body: Padding(
-        padding: EdgeInsets.all(16),
+        padding: EdgeInsets.all(20),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Enter server IP address:', style: TextStyle(fontSize: 18)),
-            SizedBox(height: 16),
-            if (widget.recentIPs.isNotEmpty) ...[
-              Text("Recent IPs:"),
-              SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                children: widget.recentIPs.map((ip) {
-                  return ElevatedButton(
-                    onPressed: () => _ipController.text = ip,
-                    child: Text(ip),
-                  );
-                }).toList(),
-              ),
-              SizedBox(height: 16),
-            ],
+            Text('Server Connection',
+                style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.blueAccent)),
+            SizedBox(height: 10),
             TextField(
               controller: _ipController,
               decoration: InputDecoration(
                 border: OutlineInputBorder(),
                 labelText: 'Server IP',
+                prefixIcon: Icon(Icons.wifi),
               ),
             ),
-            SizedBox(height: 16),
-            ElevatedButton(onPressed: _save, child: Text('Save')),
+            SizedBox(height: 10),
+            if (widget.recentIPs.isNotEmpty)
+              Wrap(
+                  spacing: 8,
+                  children: widget.recentIPs
+                      .map((ip) => ActionChip(
+                          label: Text(ip),
+                          onPressed: () => _ipController.text = ip))
+                      .toList()),
+            Divider(height: 40),
+            Text('Sensitivity',
+                style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.blueAccent)),
+            Row(children: [
+              Expanded(
+                  child: Slider(
+                      value: _tempScale,
+                      min: 0.2,
+                      max: 5.0,
+                      divisions: 20,
+                      label: _tempScale.toStringAsFixed(1),
+                      onChanged: (v) => setState(() => _tempScale = v))),
+              Text(_tempScale.toStringAsFixed(1)),
+            ]),
+            Spacer(),
+            SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: ElevatedButton(
+                    onPressed: _save,
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blueAccent),
+                    child: Text('Save', style: TextStyle(fontSize: 16)))),
           ],
         ),
       ),
